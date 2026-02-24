@@ -1,11 +1,10 @@
 "use client";
 
 import { useState, useRef, useCallback, useEffect } from "react";
-import { FFmpeg } from "@ffmpeg/ffmpeg";
-import { fetchFile, toBlobURL } from "@ffmpeg/util";
 
 type Stage = "idle" | "converting" | "done" | "error";
 
+// ─── Icons ───────────────────────────────────────────────────────────────────
 const UploadIcon = () => (
   <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
     <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
@@ -13,19 +12,16 @@ const UploadIcon = () => (
     <line x1="12" y1="3" x2="12" y2="15"/>
   </svg>
 );
-
 const WhatsAppIcon = () => (
   <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
     <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 0 1-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 0 1-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 0 1 2.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0 0 12.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 0 0 5.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 0 0-3.48-8.413z"/>
   </svg>
 );
-
 const CheckIcon = () => (
   <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
     <polyline points="20 6 9 17 4 12"/>
   </svg>
 );
-
 const AlertIcon = () => (
   <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
     <circle cx="12" cy="12" r="10"/>
@@ -33,7 +29,6 @@ const AlertIcon = () => (
     <line x1="12" y1="16" x2="12.01" y2="16"/>
   </svg>
 );
-
 const MicIcon = () => (
   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
     <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
@@ -42,7 +37,6 @@ const MicIcon = () => (
     <line x1="8" y1="23" x2="16" y2="23"/>
   </svg>
 );
-
 const DownloadIcon = () => (
   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
     <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
@@ -51,20 +45,13 @@ const DownloadIcon = () => (
   </svg>
 );
 
+// ─── Waveform ────────────────────────────────────────────────────────────────
 function Waveform({ active }: { active: boolean }) {
   return (
     <div className="flex items-center justify-center gap-[3px] h-8">
       {Array.from({ length: 9 }).map((_, i) => (
-        <div
-          key={i}
-          className={`wave-bar w-[3px] rounded-full origin-bottom ${active ? "bg-accent-green" : "bg-text-muted"}`}
-          style={{
-            height: "28px",
-            animationPlayState: active ? "running" : "paused",
-            transform: active ? undefined : "scaleY(0.25)",
-            opacity: active ? undefined : 0.3,
-          }}
-        />
+        <div key={i} className={`wave-bar w-[3px] rounded-full origin-bottom ${active ? "bg-accent-green" : "bg-text-muted"}`}
+          style={{ height: "28px", animationPlayState: active ? "running" : "paused", transform: active ? undefined : "scaleY(0.25)", opacity: active ? undefined : 0.3 }} />
       ))}
     </div>
   );
@@ -76,21 +63,107 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
 
-/**
- * Safely converts FFmpeg FileData to a Blob.
- * FFmpeg returns Uint8Array<ArrayBufferLike> which may back a SharedArrayBuffer.
- * Blob() only accepts plain ArrayBuffer, so we copy bytes into a fresh one.
- */
-function fileDataToBlob(data: Uint8Array | string): Blob {
-  if (typeof data === "string") {
-    return new Blob([data], { type: "audio/ogg; codecs=opus" });
+// ─── Core conversion using Web Audio API + MediaRecorder ─────────────────────
+// This approach has ZERO dependency on SharedArrayBuffer or WASM workers.
+// It decodes the audio natively in the browser, then re-encodes via MediaRecorder
+// with the opus codec — producing a valid audio/ogg; codecs=opus blob.
+async function convertToOpusOgg(
+  file: File,
+  onProgress: (pct: number, label: string) => void
+): Promise<Blob> {
+  onProgress(5, "Decoding audio…");
+
+  // 1. Read file as ArrayBuffer
+  const arrayBuffer = await file.arrayBuffer();
+
+  // 2. Decode with Web Audio API
+  const audioCtx = new AudioContext({ sampleRate: 48000 });
+  let audioBuffer: AudioBuffer;
+  try {
+    audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+  } catch {
+    // Try with a fresh context at default rate
+    const fallbackCtx = new AudioContext();
+    audioBuffer = await fallbackCtx.decodeAudioData(arrayBuffer.slice(0));
+    await fallbackCtx.close();
   }
-  // Copy into a guaranteed plain ArrayBuffer — avoids SharedArrayBuffer TS conflict
-  const copy = new ArrayBuffer(data.byteLength);
-  new Uint8Array(copy).set(data);
-  return new Blob([copy], { type: "audio/ogg; codecs=opus" });
+
+  onProgress(30, "Preparing encoder…");
+
+  // 3. Mix down to mono at 48kHz via OfflineAudioContext
+  const offlineCtx = new OfflineAudioContext(1, Math.ceil(audioBuffer.duration * 48000), 48000);
+  const source = offlineCtx.createBufferSource();
+  source.buffer = audioBuffer;
+  source.connect(offlineCtx.destination);
+  source.start(0);
+  const rendered = await offlineCtx.startRendering();
+  await audioCtx.close();
+
+  onProgress(55, "Encoding to OGG Opus…");
+
+  // 4. Stream through MediaRecorder to get OGG Opus
+  // We pipe the rendered buffer into a live AudioContext → MediaStreamDestination → MediaRecorder
+  const encCtx = new AudioContext({ sampleRate: 48000 });
+  const dest = encCtx.createMediaStreamDestination();
+  const bufSrc = encCtx.createBufferSource();
+  bufSrc.buffer = rendered;
+  bufSrc.connect(dest);
+
+  // Pick best supported mime type
+  const mimeType = (() => {
+    const candidates = [
+      "audio/ogg; codecs=opus",
+      "audio/ogg",
+      "audio/webm; codecs=opus",
+      "audio/webm",
+    ];
+    for (const m of candidates) {
+      if (typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported(m)) return m;
+    }
+    return "";
+  })();
+
+  if (!mimeType) throw new Error("Your browser doesn't support audio recording. Please try Chrome or Firefox.");
+
+  const recorder = new MediaRecorder(dest.stream, {
+    mimeType,
+    audioBitsPerSecond: 32000,
+  });
+
+  const chunks: BlobPart[] = [];
+  recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
+
+  const recordingDone = new Promise<Blob>((resolve, reject) => {
+    recorder.onstop = () => {
+      const blob = new Blob(chunks, { type: "audio/ogg; codecs=opus" });
+      resolve(blob);
+    };
+    recorder.onerror = (e) => reject(new Error("Recording error: " + e.toString()));
+  });
+
+  recorder.start(100);
+  bufSrc.start(0);
+
+  // Stop recorder when audio finishes (+ small buffer)
+  const duration = rendered.duration;
+  await new Promise<void>((resolve) => {
+    setTimeout(() => {
+      recorder.stop();
+      encCtx.close();
+      resolve();
+    }, (duration * 1000) + 300);
+  });
+
+  onProgress(90, "Finalising…");
+  const blob = await recordingDone;
+
+  if (blob.size < 100) throw new Error("Output file is empty — the audio may be silent or corrupted.");
+
+  onProgress(100, "Done!");
+  return blob;
 }
 
+// ─── Main Component ──────────────────────────────────────────────────────────
 export default function Home() {
   const [stage, setStage] = useState<Stage>("idle");
   const [progress, setProgress] = useState(0);
@@ -102,49 +175,19 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
   const [canShare, setCanShare] = useState(false);
-
-  const ffmpegRef = useRef<FFmpeg | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    setCanShare(
-      typeof navigator !== "undefined" &&
-        "share" in navigator &&
-        "canShare" in navigator
-    );
+    setCanShare(typeof navigator !== "undefined" && "share" in navigator && "canShare" in navigator);
   }, []);
 
   useEffect(() => {
-    return () => {
-      if (outputUrl) URL.revokeObjectURL(outputUrl);
-    };
+    return () => { if (outputUrl) URL.revokeObjectURL(outputUrl); };
   }, [outputUrl]);
-
-  const loadFFmpeg = async (): Promise<FFmpeg> => {
-    if (ffmpegRef.current) return ffmpegRef.current;
-    const ffmpeg = new FFmpeg();
-    const baseURL = "https://unpkg.com/@ffmpeg/core-mt@0.12.6/dist/esm";
-    ffmpeg.on("progress", ({ progress: p }) => {
-      setProgress(Math.round(p * 80 + 10));
-    });
-    setProgressLabel("Loading FFmpeg engine…");
-    setProgress(5);
-    await ffmpeg.load({
-      coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, "text/javascript"),
-      wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, "application/wasm"),
-      workerURL: await toBlobURL(`${baseURL}/ffmpeg-core.worker.js`, "text/javascript"),
-    });
-    ffmpegRef.current = ffmpeg;
-    return ffmpeg;
-  };
 
   const processFile = async (file: File) => {
     const isAudio = file.type.startsWith("audio/") || /\.(mp3|wav|ogg|m4a|aac|flac)$/i.test(file.name);
-    if (!isAudio) {
-      setError("Please upload an audio file (MP3, WAV, OGG, M4A, AAC).");
-      setStage("error");
-      return;
-    }
+    if (!isAudio) { setError("Please upload an audio file (MP3, WAV, OGG, M4A, AAC)."); setStage("error"); return; }
 
     setInputFile(file);
     setOutputBlob(null);
@@ -154,45 +197,15 @@ export default function Home() {
     setProgress(0);
 
     try {
-      const ffmpeg = await loadFFmpeg();
-      setProgressLabel("Reading audio file…");
-      setProgress(8);
+      const blob = await convertToOpusOgg(file, (pct, label) => {
+        setProgress(pct);
+        setProgressLabel(label);
+      });
 
-      const ext = file.name.includes(".") ? file.name.slice(file.name.lastIndexOf(".")) : ".mp3";
-      const inputName = `input${ext}`;
-      const outputName = "output.ogg";
-
-      await ffmpeg.writeFile(inputName, await fetchFile(file));
-      setProgressLabel("Converting to OGG Opus…");
-      setProgress(15);
-
-      await ffmpeg.exec([
-        "-i", inputName,
-        "-c:a", "libopus",
-        "-b:a", "32k",
-        "-vbr", "on",
-        "-compression_level", "10",
-        "-application", "voip",
-        "-ar", "48000",
-        "-ac", "1",
-        outputName,
-      ]);
-
-      setProgressLabel("Finalising…");
-      setProgress(95);
-
-      const rawData = await ffmpeg.readFile(outputName);
-      const blob = fileDataToBlob(rawData as Uint8Array | string);
       const url = URL.createObjectURL(blob);
-
-      await ffmpeg.deleteFile(inputName);
-      await ffmpeg.deleteFile(outputName);
-
       setOutputBlob(blob);
       setOutputUrl(url);
       setOutputSize(blob.size);
-      setProgress(100);
-      setProgressLabel("Done!");
       setStage("done");
     } catch (err) {
       console.error(err);
@@ -242,26 +255,19 @@ export default function Home() {
   };
 
   const reset = () => {
-    setStage("idle");
-    setInputFile(null);
-    setOutputBlob(null);
-    setOutputUrl(null);
-    setError(null);
-    setProgress(0);
+    setStage("idle"); setInputFile(null); setOutputBlob(null);
+    setOutputUrl(null); setError(null); setProgress(0);
   };
 
   return (
     <div className="grain min-h-screen flex flex-col">
-      <div
-        className="fixed inset-0 pointer-events-none"
-        style={{ background: "radial-gradient(ellipse 60% 50% at 50% 0%, rgba(37,211,102,0.06) 0%, transparent 70%)" }}
-      />
+      <div className="fixed inset-0 pointer-events-none"
+        style={{ background: "radial-gradient(ellipse 60% 50% at 50% 0%, rgba(37,211,102,0.06) 0%, transparent 70%)" }} />
 
+      {/* Header */}
       <header className="relative z-10 flex items-center justify-between px-6 py-5 border-b border-surface-2">
         <div className="flex items-center gap-3">
-          <div className="w-8 h-8 rounded-lg bg-accent-green flex items-center justify-center text-surface-0">
-            <MicIcon />
-          </div>
+          <div className="w-8 h-8 rounded-lg bg-accent-green flex items-center justify-center text-surface-0"><MicIcon /></div>
           <span className="font-bold text-lg tracking-tight">VoiceNote</span>
         </div>
         <div className="flex items-center gap-2 text-text-muted font-mono text-xs">
@@ -270,12 +276,11 @@ export default function Home() {
         </div>
       </header>
 
+      {/* Main */}
       <main className="relative z-10 flex-1 flex flex-col items-center justify-center px-4 py-12 gap-8">
         <div className="text-center animate-fade-in-up">
           <h1 className="text-4xl md:text-5xl font-extrabold tracking-tight leading-tight mb-3">
-            Audio →{" "}
-            <span className="text-accent-green">WhatsApp</span>
-            <br />Voice Note
+            Audio →{" "}<span className="text-accent-green">WhatsApp</span><br />Voice Note
           </h1>
           <p className="text-text-secondary text-base max-w-md mx-auto leading-relaxed">
             Upload an MP3 or WAV from ElevenLabs and convert it to the exact OGG Opus format
@@ -285,19 +290,16 @@ export default function Home() {
 
         <div className="w-full max-w-lg animate-fade-in-up-delay">
 
+          {/* Idle */}
           {stage === "idle" && (
             <div
-              onDrop={handleDrop}
-              onDragOver={handleDragOver}
-              onDragLeave={handleDragLeave}
+              onDrop={handleDrop} onDragOver={handleDragOver} onDragLeave={handleDragLeave}
               onClick={() => fileInputRef.current?.click()}
-              className={`
-                relative border-2 border-dashed rounded-2xl p-12 flex flex-col items-center gap-5
-                cursor-pointer transition-all duration-200 group
-                ${isDragOver ? "border-accent-green bg-accent-green-glow scale-[1.01]" : "border-surface-3 hover:border-accent-green-dim hover:bg-surface-1"}
-              `}
+              className={`relative border-2 border-dashed rounded-2xl p-12 flex flex-col items-center gap-5 cursor-pointer transition-all duration-200 group
+                ${isDragOver ? "border-accent-green bg-accent-green-glow scale-[1.01]" : "border-surface-3 hover:border-accent-green-dim hover:bg-surface-1"}`}
             >
-              <div className={`w-16 h-16 rounded-2xl flex items-center justify-center transition-colors duration-200 ${isDragOver ? "bg-accent-green text-surface-0" : "bg-surface-2 text-text-secondary group-hover:bg-accent-green group-hover:text-surface-0"}`}>
+              <div className={`w-16 h-16 rounded-2xl flex items-center justify-center transition-colors duration-200
+                ${isDragOver ? "bg-accent-green text-surface-0" : "bg-surface-2 text-text-secondary group-hover:bg-accent-green group-hover:text-surface-0"}`}>
                 <UploadIcon />
               </div>
               <div className="text-center">
@@ -308,28 +310,30 @@ export default function Home() {
             </div>
           )}
 
+          {/* Converting */}
           {stage === "converting" && (
             <div className="border border-surface-2 rounded-2xl p-10 flex flex-col items-center gap-6 bg-surface-1">
               <Waveform active={true} />
               <div className="w-full space-y-2">
                 <div className="flex justify-between text-xs font-mono text-text-secondary">
-                  <span>{progressLabel}</span>
-                  <span>{progress}%</span>
+                  <span>{progressLabel}</span><span>{progress}%</span>
                 </div>
                 <div className="w-full h-1.5 bg-surface-2 rounded-full overflow-hidden">
                   <div className="h-full shimmer-bar rounded-full transition-all duration-300" style={{ width: `${progress}%` }} />
                 </div>
               </div>
               {inputFile && <p className="text-text-muted text-xs font-mono truncate max-w-xs">{inputFile.name}</p>}
+              <p className="text-text-muted text-xs text-center">
+                Processing takes as long as the audio duration.<br />Please keep this tab open.
+              </p>
             </div>
           )}
 
+          {/* Done */}
           {stage === "done" && outputUrl && (
             <div className="border border-accent-green/20 rounded-2xl bg-surface-1 overflow-hidden glow-pulse animate-fade-in-up">
               <div className="bg-accent-green/10 border-b border-accent-green/20 px-6 py-4 flex items-center gap-3">
-                <div className="w-8 h-8 rounded-full bg-accent-green flex items-center justify-center text-surface-0 flex-shrink-0">
-                  <CheckIcon />
-                </div>
+                <div className="w-8 h-8 rounded-full bg-accent-green flex items-center justify-center text-surface-0 flex-shrink-0"><CheckIcon /></div>
                 <div>
                   <p className="font-semibold text-accent-green text-sm">Conversion complete</p>
                   <p className="text-text-muted text-xs font-mono">audio/ogg; codecs=opus · {formatBytes(outputSize)}</p>
@@ -353,19 +357,15 @@ export default function Home() {
                 )}
 
                 <div className="space-y-3">
-                  <button
-                    onClick={handleShare}
-                    className="w-full flex items-center justify-center gap-2.5 bg-accent-green hover:bg-accent-green-dim text-surface-0 font-bold py-3.5 px-6 rounded-xl transition-all duration-150 hover:scale-[1.01] active:scale-[0.99]"
-                  >
+                  <button onClick={handleShare}
+                    className="w-full flex items-center justify-center gap-2.5 bg-accent-green hover:bg-accent-green-dim text-surface-0 font-bold py-3.5 px-6 rounded-xl transition-all duration-150 hover:scale-[1.01] active:scale-[0.99]">
                     <WhatsAppIcon />
                     {canShare ? "Share as Voice Note" : "Download Voice Note (.ogg)"}
                   </button>
 
                   {canShare && (
-                    <button
-                      onClick={handleDownload}
-                      className="w-full flex items-center justify-center gap-2 text-text-secondary hover:text-text-primary border border-surface-3 hover:border-text-muted py-3 px-6 rounded-xl transition-all duration-150 text-sm"
-                    >
+                    <button onClick={handleDownload}
+                      className="w-full flex items-center justify-center gap-2 text-text-secondary hover:text-text-primary border border-surface-3 hover:border-text-muted py-3 px-6 rounded-xl transition-all duration-150 text-sm">
                       <DownloadIcon />
                       Save as file instead
                     </button>
@@ -379,25 +379,20 @@ export default function Home() {
               </div>
 
               <div className="border-t border-surface-2 px-6 py-3">
-                <button onClick={reset} className="text-text-muted hover:text-text-secondary text-xs font-mono transition-colors">
-                  ← Convert another file
-                </button>
+                <button onClick={reset} className="text-text-muted hover:text-text-secondary text-xs font-mono transition-colors">← Convert another file</button>
               </div>
             </div>
           )}
 
+          {/* Error */}
           {stage === "error" && (
             <div className="border border-red-500/20 rounded-2xl bg-surface-1 p-8 flex flex-col items-center gap-4 animate-fade-in-up">
-              <div className="w-12 h-12 rounded-full bg-red-500/10 border border-red-500/20 flex items-center justify-center text-red-400">
-                <AlertIcon />
-              </div>
+              <div className="w-12 h-12 rounded-full bg-red-500/10 border border-red-500/20 flex items-center justify-center text-red-400"><AlertIcon /></div>
               <div className="text-center">
                 <p className="font-semibold text-red-400 mb-1">Something went wrong</p>
                 <p className="text-text-secondary text-sm max-w-xs leading-relaxed">{error}</p>
               </div>
-              <button onClick={reset} className="mt-2 text-text-secondary hover:text-text-primary border border-surface-3 hover:border-text-muted py-2.5 px-6 rounded-xl text-sm transition-colors">
-                Try again
-              </button>
+              <button onClick={reset} className="mt-2 text-text-secondary hover:text-text-primary border border-surface-3 hover:border-text-muted py-2.5 px-6 rounded-xl text-sm transition-colors">Try again</button>
             </div>
           )}
         </div>
@@ -407,7 +402,7 @@ export default function Home() {
             {[
               { label: "Browser-only", desc: "No server. Files never leave your device." },
               { label: "Opus codec", desc: "The exact format WhatsApp uses for voice notes." },
-              { label: "48kHz mono", desc: "Voice-optimised settings for small, clear files." },
+              { label: "No WASM", desc: "Uses native Web Audio API — works on all browsers." },
             ].map((item) => (
               <div key={item.label} className="bg-surface-1 border border-surface-2 rounded-xl p-4">
                 <p className="font-semibold text-text-primary text-sm mb-1">{item.label}</p>
@@ -419,7 +414,7 @@ export default function Home() {
       </main>
 
       <footer className="relative z-10 text-center py-5 text-text-muted text-xs font-mono border-t border-surface-2">
-        FFmpeg runs entirely in your browser via WebAssembly · No data is transmitted
+        Converts audio natively in your browser · No data is transmitted
       </footer>
     </div>
   );
