@@ -3,6 +3,7 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 
 type Stage = "idle" | "converting" | "done" | "error";
+type Browser = "brave" | "chrome" | "samsung" | "firefox" | "safari" | "other";
 
 // ─── Icons ───────────────────────────────────────────────────────────────────
 const UploadIcon = () => (
@@ -44,6 +45,37 @@ const DownloadIcon = () => (
     <line x1="12" y1="15" x2="12" y2="3"/>
   </svg>
 );
+const ChromeIcon = () => (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+    <path d="M12 0C8.21 0 4.831 1.757 2.632 4.501l3.953 6.848A5.454 5.454 0 0 1 12 6.545h10.691A12 12 0 0 0 12 0zM1.931 5.47A11.943 11.943 0 0 0 0 12c0 6.012 4.42 10.991 10.189 11.864l3.953-6.847a5.45 5.45 0 0 1-6.865-2.29zm13.342 2.166a5.446 5.446 0 0 1 1.45 7.09l.002.001h-.002l-5.344 9.257c.206.01.413.016.621.016 6.627 0 12-5.373 12-12 0-1.54-.29-3.011-.818-4.364zM12 10.364a1.636 1.636 0 1 0 0 3.272 1.636 1.636 0 0 0 0-3.272z"/>
+  </svg>
+);
+
+// ─── Browser detection ───────────────────────────────────────────────────────
+function detectBrowser(): Browser {
+  if (typeof navigator === "undefined") return "other";
+  const ua = navigator.userAgent;
+  // Brave exposes a specific API
+  if ((navigator as { brave?: { isBrave?: unknown } }).brave?.isBrave) return "brave";
+  // Fallback UA check
+  if (/brave/i.test(ua)) return "brave";
+  if (/SamsungBrowser/i.test(ua)) return "samsung";
+  if (/Firefox/i.test(ua)) return "firefox";
+  if (/Chrome/i.test(ua)) return "chrome";
+  if (/Safari/i.test(ua)) return "safari";
+  return "other";
+}
+
+// Check if Web Share API supports files
+async function canShareFiles(): Promise<boolean> {
+  if (typeof navigator === "undefined" || !("share" in navigator)) return false;
+  try {
+    const testFile = new File(["test"], "test.opus", { type: "audio/ogg; codecs=opus" });
+    return navigator.canShare?.({ files: [testFile] }) ?? false;
+  } catch {
+    return false;
+  }
+}
 
 function Waveform({ active }: { active: boolean }) {
   return (
@@ -62,14 +94,9 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
 
-// ─── Conversion: Web Audio API → MediaRecorder → OGG Opus ───────────────────
-async function convertToOpus(
-  file: File,
-  onProgress: (pct: number, label: string) => void
-): Promise<Blob> {
+async function convertToOpus(file: File, onProgress: (pct: number, label: string) => void): Promise<Blob> {
   onProgress(5, "Decoding audio…");
   const arrayBuffer = await file.arrayBuffer();
-
   const audioCtx = new AudioContext({ sampleRate: 48000 });
   let audioBuffer: AudioBuffer;
   try {
@@ -79,7 +106,6 @@ async function convertToOpus(
     audioBuffer = await fallbackCtx.decodeAudioData(arrayBuffer.slice(0));
     await fallbackCtx.close();
   }
-
   onProgress(30, "Mixing to mono 48kHz…");
   const offlineCtx = new OfflineAudioContext(1, Math.ceil(audioBuffer.duration * 48000), 48000);
   const source = offlineCtx.createBufferSource();
@@ -88,87 +114,42 @@ async function convertToOpus(
   source.start(0);
   const rendered = await offlineCtx.startRendering();
   await audioCtx.close();
-
   onProgress(55, "Encoding Opus…");
 
-  // Pick best supported MIME — prefer ogg/opus which WhatsApp recognises as voice note
   const mimeType = (() => {
-    const candidates = [
-      "audio/ogg; codecs=opus",
-      "audio/ogg",
-      "audio/webm; codecs=opus",
-      "audio/webm",
-    ];
+    const candidates = ["audio/ogg; codecs=opus", "audio/ogg", "audio/webm; codecs=opus", "audio/webm"];
     for (const m of candidates) {
       if (typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported(m)) return m;
     }
     return null;
   })();
-
-  if (!mimeType) throw new Error("Your browser doesn't support audio encoding. Please use Chrome or Firefox on Android.");
+  if (!mimeType) throw new Error("Your browser doesn't support audio encoding. Please use Chrome for Android.");
 
   const encCtx = new AudioContext({ sampleRate: 48000 });
   const dest = encCtx.createMediaStreamDestination();
   const bufSrc = encCtx.createBufferSource();
   bufSrc.buffer = rendered;
   bufSrc.connect(dest);
-
-  const recorder = new MediaRecorder(dest.stream, {
-    mimeType,
-    audioBitsPerSecond: 32000,
-  });
-
+  const recorder = new MediaRecorder(dest.stream, { mimeType, audioBitsPerSecond: 32000 });
   const chunks: BlobPart[] = [];
   recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
-
   const recordingDone = new Promise<Blob>((resolve, reject) => {
     recorder.onstop = () => resolve(new Blob(chunks, { type: "audio/ogg; codecs=opus" }));
     recorder.onerror = (e) => reject(new Error("Encoding error: " + e.toString()));
   });
-
   recorder.start(100);
   bufSrc.start(0);
-
   await new Promise<void>((resolve) => {
     setTimeout(() => { recorder.stop(); encCtx.close(); resolve(); }, (rendered.duration * 1000) + 400);
   });
-
   onProgress(95, "Finalising…");
   const blob = await recordingDone;
-  if (blob.size < 100) throw new Error("Output file is empty — the audio may be silent or corrupted.");
-
+  if (blob.size < 100) throw new Error("Output is empty — audio may be silent or corrupted.");
   onProgress(100, "Done!");
   return blob;
 }
 
-// ─── Share directly to WhatsApp ──────────────────────────────────────────────
-// Strategy:
-// 1. Try navigator.share() with file — on Android this opens the OS share sheet
-//    and the user picks WhatsApp. This is the ONLY way to share a file directly.
-// 2. WhatsApp REQUIRES the file to have .opus extension + audio/ogg;codecs=opus MIME
-//    to treat it as a voice note (not music).
-// 3. If share API unavailable → download the file as fallback.
-async function shareToWhatsApp(blob: Blob, baseName: string): Promise<"shared" | "downloaded" | "aborted"> {
-  // Always use .opus extension — WhatsApp identifies voice notes by this
-  const fileName = `${baseName}.opus`;
-  const file = new File([blob], fileName, { type: "audio/ogg; codecs=opus" });
-
-  // Try Web Share API (works on Android Chrome, Samsung Browser, etc.)
-  if (typeof navigator !== "undefined" && "share" in navigator) {
-    try {
-      const shareData: ShareData = { files: [file], title: "Voice Note" };
-      // canShare check
-      if (!("canShare" in navigator) || navigator.canShare(shareData)) {
-        await navigator.share(shareData);
-        return "shared";
-      }
-    } catch (err) {
-      if (err instanceof Error && err.name === "AbortError") return "aborted";
-      // Fall through to download
-    }
-  }
-
-  // Fallback: trigger download
+function triggerDownload(blob: Blob, fileName: string) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
@@ -177,7 +158,6 @@ async function shareToWhatsApp(blob: Blob, baseName: string): Promise<"shared" |
   a.click();
   document.body.removeChild(a);
   setTimeout(() => URL.revokeObjectURL(url), 5000);
-  return "downloaded";
 }
 
 // ─── Main ────────────────────────────────────────────────────────────────────
@@ -191,55 +171,41 @@ export default function Home() {
   const [outputSize, setOutputSize] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
-  const [shareStatus, setShareStatus] = useState<string | null>(null);
-  const [isMobile, setIsMobile] = useState(false);
+  const [browser, setBrowser] = useState<Browser>("other");
+  const [shareSupported, setShareSupported] = useState<boolean | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    setIsMobile(/Android|iPhone|iPad/i.test(navigator.userAgent));
+    const b = detectBrowser();
+    setBrowser(b);
+    canShareFiles().then(setShareSupported);
   }, []);
 
   useEffect(() => {
     return () => { if (outputUrl) URL.revokeObjectURL(outputUrl); };
   }, [outputUrl]);
 
+  const isBrave = browser === "brave";
+  const isAndroid = typeof navigator !== "undefined" && /Android/i.test(navigator.userAgent);
+
   const processFile = async (file: File) => {
     const isAudio = file.type.startsWith("audio/") || /\.(mp3|wav|ogg|m4a|aac|flac|opus)$/i.test(file.name);
     if (!isAudio) { setError("Please upload an audio file (MP3, WAV, M4A, AAC)."); setStage("error"); return; }
-
-    setInputFile(file);
-    setOutputBlob(null);
-    setOutputUrl(null);
-    setShareStatus(null);
-    setError(null);
-    setStage("converting");
-    setProgress(0);
-
+    setInputFile(file); setOutputBlob(null); setOutputUrl(null); setError(null);
+    setStage("converting"); setProgress(0);
     try {
-      const blob = await convertToOpus(file, (pct, label) => {
-        setProgress(pct);
-        setProgressLabel(label);
-      });
+      const blob = await convertToOpus(file, (pct, label) => { setProgress(pct); setProgressLabel(label); });
       const url = URL.createObjectURL(blob);
-      setOutputBlob(blob);
-      setOutputUrl(url);
-      setOutputSize(blob.size);
-      setStage("done");
+      setOutputBlob(blob); setOutputUrl(url); setOutputSize(blob.size); setStage("done");
     } catch (err) {
-      console.error(err);
-      setError(err instanceof Error ? err.message : "Conversion failed. Please try again.");
-      setStage("error");
+      setError(err instanceof Error ? err.message : "Conversion failed."); setStage("error");
     }
   };
 
-  const handleFiles = (files: FileList | null) => {
-    if (!files || files.length === 0) return;
-    processFile(files[0]);
-  };
+  const handleFiles = (files: FileList | null) => { if (files?.length) processFile(files[0]); };
 
   const handleDrop = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    setIsDragOver(false);
+    e.preventDefault(); setIsDragOver(false);
     if (e.dataTransfer.files.length > 0) processFile(e.dataTransfer.files[0]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -247,43 +213,60 @@ export default function Home() {
   const handleDragOver = (e: React.DragEvent) => { e.preventDefault(); setIsDragOver(true); };
   const handleDragLeave = () => setIsDragOver(false);
 
+  const fileName = inputFile ? inputFile.name.replace(/\.[^.]+$/, "") + ".opus" : "voicenote.opus";
+
   const handleShare = async () => {
-    if (!outputBlob || !inputFile) return;
-    setShareStatus("opening…");
-    const baseName = inputFile.name.replace(/\.[^.]+$/, "");
-    const result = await shareToWhatsApp(outputBlob, baseName);
-    if (result === "downloaded") {
-      setShareStatus("📥 File downloaded — open it from your Downloads and share to WhatsApp manually.");
-    } else if (result === "shared") {
-      setShareStatus(null);
-    } else {
-      setShareStatus(null);
+    if (!outputBlob) return;
+    const file = new File([outputBlob], fileName, { type: "audio/ogg; codecs=opus" });
+    try {
+      await navigator.share({ files: [file], title: "Voice Note" });
+    } catch (err) {
+      if (err instanceof Error && err.name !== "AbortError") {
+        triggerDownload(outputBlob, fileName);
+      }
     }
   };
 
-  const handleDownload = () => {
-    if (!outputBlob || !inputFile) return;
-    const url = URL.createObjectURL(outputBlob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = inputFile.name.replace(/\.[^.]+$/, "") + ".opus";
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    setTimeout(() => URL.revokeObjectURL(url), 5000);
-  };
+  const handleDownload = () => { if (outputBlob) triggerDownload(outputBlob, fileName); };
 
   const reset = () => {
-    setStage("idle"); setInputFile(null); setOutputBlob(null);
-    setOutputUrl(null); setError(null); setProgress(0); setShareStatus(null);
+    setStage("idle"); setInputFile(null); setOutputBlob(null); setOutputUrl(null); setError(null); setProgress(0);
   };
+
+  // ── Brave warning banner ──────────────────────────────────────────────────
+  const BraveBanner = () => (
+    <div className="w-full max-w-lg mb-2 animate-fade-in-up">
+      <div className="bg-amber-500/10 border border-amber-500/30 rounded-2xl px-5 py-4 flex gap-3 items-start">
+        <span className="text-xl flex-shrink-0">⚠️</span>
+        <div>
+          <p className="font-bold text-amber-400 text-sm mb-1">Brave Browser detected</p>
+          <p className="text-amber-200/70 text-xs leading-relaxed">
+            Brave blocks the Web Share API, so the share button will download the file instead of opening WhatsApp directly.
+          </p>
+          <p className="text-amber-200/70 text-xs leading-relaxed mt-2">
+            <strong className="text-amber-300">For direct WhatsApp sharing, open this page in Chrome:</strong>
+          </p>
+          <button
+            onClick={() => {
+              const url = window.location.href;
+              // Try to open in Chrome via intent
+              window.location.href = `intent://${url.replace(/^https?:\/\//, "")}#Intent;scheme=https;package=com.android.chrome;end`;
+            }}
+            className="mt-2 flex items-center gap-2 bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-300 font-semibold text-xs px-3 py-2 rounded-lg transition-colors"
+          >
+            <ChromeIcon />
+            Open in Chrome instead
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 
   return (
     <div className="grain min-h-screen flex flex-col">
       <div className="fixed inset-0 pointer-events-none"
         style={{ background: "radial-gradient(ellipse 60% 50% at 50% 0%, rgba(37,211,102,0.06) 0%, transparent 70%)" }} />
 
-      {/* Header */}
       <header className="relative z-10 flex items-center justify-between px-6 py-5 border-b border-surface-2">
         <div className="flex items-center gap-3">
           <div className="w-8 h-8 rounded-lg bg-accent-green flex items-center justify-center text-surface-0"><MicIcon /></div>
@@ -295,8 +278,11 @@ export default function Home() {
         </div>
       </header>
 
-      {/* Main */}
-      <main className="relative z-10 flex-1 flex flex-col items-center justify-center px-4 py-12 gap-8">
+      <main className="relative z-10 flex-1 flex flex-col items-center justify-center px-4 py-12 gap-6">
+
+        {/* Brave warning */}
+        {isBrave && <BraveBanner />}
+
         <div className="text-center animate-fade-in-up">
           <h1 className="text-4xl md:text-5xl font-extrabold tracking-tight leading-tight mb-3">
             Audio →{" "}<span className="text-accent-green">WhatsApp</span><br />Voice Note
@@ -321,8 +307,8 @@ export default function Home() {
                 <UploadIcon />
               </div>
               <div className="text-center">
-                <p className="font-semibold text-text-primary mb-1">Drop your audio file here</p>
-                <p className="text-text-secondary text-sm">or tap to browse · MP3, WAV, OGG, M4A, AAC</p>
+                <p className="font-semibold text-text-primary mb-1">Tap to select audio file</p>
+                <p className="text-text-secondary text-sm">MP3, WAV, OGG, M4A, AAC</p>
               </div>
               <input ref={fileInputRef} type="file" accept="audio/*" className="hidden" onChange={(e) => handleFiles(e.target.files)} />
             </div>
@@ -341,14 +327,13 @@ export default function Home() {
                 </div>
               </div>
               {inputFile && <p className="text-text-muted text-xs font-mono truncate max-w-xs">{inputFile.name}</p>}
-              <p className="text-text-muted text-xs text-center">Processing takes roughly as long as the audio.<br />Keep this tab open.</p>
+              <p className="text-text-muted text-xs text-center">Takes as long as the audio duration.<br />Keep this tab open.</p>
             </div>
           )}
 
           {/* Done */}
           {stage === "done" && outputUrl && (
             <div className="border border-accent-green/20 rounded-2xl bg-surface-1 overflow-hidden glow-pulse animate-fade-in-up">
-              {/* Success bar */}
               <div className="bg-accent-green/10 border-b border-accent-green/20 px-6 py-4 flex items-center gap-3">
                 <div className="w-8 h-8 rounded-full bg-accent-green flex items-center justify-center text-surface-0 flex-shrink-0"><CheckIcon /></div>
                 <div>
@@ -358,13 +343,11 @@ export default function Home() {
               </div>
 
               <div className="px-6 py-5 space-y-4">
-                {/* Preview */}
                 <div>
                   <p className="text-text-secondary text-xs font-mono mb-2 uppercase tracking-widest">Preview</p>
                   <audio controls src={outputUrl} className="w-full rounded-lg" style={{ accentColor: "#25D366" }} />
                 </div>
 
-                {/* File info */}
                 {inputFile && (
                   <div className="bg-surface-2 rounded-xl px-4 py-3 flex items-center justify-between">
                     <div className="min-w-0">
@@ -375,40 +358,66 @@ export default function Home() {
                   </div>
                 )}
 
-                {/* Share status message */}
-                {shareStatus && (
-                  <div className="bg-surface-2 border border-surface-3 rounded-xl px-4 py-3">
-                    <p className="text-text-secondary text-xs leading-relaxed">{shareStatus}</p>
+                {/* Brave: show download + instructions */}
+                {isBrave ? (
+                  <div className="space-y-3">
+                    <button onClick={handleDownload}
+                      className="w-full flex items-center justify-center gap-2.5 bg-accent-green hover:bg-accent-green-dim text-surface-0 font-bold py-4 px-6 rounded-xl transition-all duration-150 text-base">
+                      <DownloadIcon />
+                      Download .opus file
+                    </button>
+                    <div className="bg-surface-2/60 border border-amber-500/20 rounded-xl px-4 py-3">
+                      <p className="text-amber-300 text-xs font-bold mb-1">How to send in WhatsApp (Brave):</p>
+                      <ol className="text-text-muted text-xs leading-relaxed space-y-1 list-decimal list-inside">
+                        <li>Tap Download above → file saves to Downloads</li>
+                        <li>Open WhatsApp → open your chat</li>
+                        <li>Tap the 📎 attachment icon → select Document</li>
+                        <li>Navigate to Downloads → pick the .opus file</li>
+                        <li>WhatsApp will send it as a 🎙️ voice note</li>
+                      </ol>
+                    </div>
+                    <p className="text-center text-text-muted text-xs">
+                      Or open this page in{" "}
+                      <button onClick={() => { window.location.href = `intent://${window.location.href.replace(/^https?:\/\//, "")}#Intent;scheme=https;package=com.android.chrome;end`; }}
+                        className="text-accent-green underline">Chrome</a>
+                      {" "}for one-tap sharing.
+                    </p>
+                  </div>
+                ) : shareSupported ? (
+                  // Chrome / Samsung — direct share works
+                  <div className="space-y-3">
+                    <button onClick={handleShare}
+                      className="w-full flex items-center justify-center gap-2.5 bg-accent-green hover:bg-accent-green-dim text-surface-0 font-bold py-4 px-6 rounded-xl transition-all duration-150 hover:scale-[1.01] active:scale-[0.99] text-base">
+                      <WhatsAppIcon />
+                      Share as Voice Note
+                    </button>
+                    <p className="text-text-muted text-xs text-center leading-relaxed">
+                      Tap → OS share sheet opens → pick <strong className="text-text-secondary">WhatsApp</strong> → pick contact → send.<br />
+                      WhatsApp shows it as a 🎙️ voice note.
+                    </p>
+                    <button onClick={handleDownload}
+                      className="w-full flex items-center justify-center gap-2 text-text-secondary hover:text-text-primary border border-surface-3 hover:border-text-muted py-3 px-6 rounded-xl transition-all duration-150 text-sm">
+                      <DownloadIcon />
+                      Download .opus file instead
+                    </button>
+                  </div>
+                ) : (
+                  // Desktop or unsupported browser
+                  <div className="space-y-3">
+                    <button onClick={handleDownload}
+                      className="w-full flex items-center justify-center gap-2.5 bg-accent-green hover:bg-accent-green-dim text-surface-0 font-bold py-4 px-6 rounded-xl transition-all duration-150 text-base">
+                      <DownloadIcon />
+                      Download .opus file
+                    </button>
+                    <div className="bg-surface-2/60 rounded-xl px-4 py-3 border border-surface-3">
+                      <p className="text-text-muted text-xs leading-relaxed">
+                        {isAndroid
+                          ? "File sharing not supported in this browser. Download the file, then open WhatsApp → chat → 📎 → Document → pick the .opus file."
+                          : "On desktop: download the .opus file → go to WhatsApp Web → chat → 📎 attachment → send. WhatsApp will show it as a voice note."}
+                      </p>
+                    </div>
                   </div>
                 )}
-
-                {/* Primary: Share via WhatsApp */}
-                <button
-                  onClick={handleShare}
-                  className="w-full flex items-center justify-center gap-2.5 bg-accent-green hover:bg-accent-green-dim text-surface-0 font-bold py-4 px-6 rounded-xl transition-all duration-150 hover:scale-[1.01] active:scale-[0.99] text-base"
-                >
-                  <WhatsAppIcon />
-                  {isMobile ? "Share as Voice Note" : "Share / Download .opus"}
-                </button>
-
-                {/* How it works tip */}
-                <div className="bg-surface-2/50 rounded-xl px-4 py-3 border border-surface-3">
-                  <p className="text-text-muted text-xs leading-relaxed">
-                    {isMobile
-                      ? <>Tap the button above → your OS share sheet opens → pick <strong className="text-text-secondary">WhatsApp</strong> → select a contact → send. WhatsApp will show it as a 🎙️ voice note.</>
-                      : <>On <strong className="text-text-secondary">desktop</strong>: the file downloads as <code className="text-accent-green">.opus</code>. Send it via WhatsApp Web by attaching as a file — WhatsApp Web will show it as a voice note.</>
-                    }
-                  </p>
-                </div>
-
-                {/* Secondary: explicit download */}
-                <button
-                  onClick={handleDownload}
-                  className="w-full flex items-center justify-center gap-2 text-text-secondary hover:text-text-primary border border-surface-3 hover:border-text-muted py-3 px-6 rounded-xl transition-all duration-150 text-sm"
-                >
-                  <DownloadIcon />
-                  Download .opus file
-                </button>
               </div>
 
               <div className="border-t border-surface-2 px-6 py-3">
@@ -434,7 +443,7 @@ export default function Home() {
           <div className="w-full max-w-lg grid grid-cols-3 gap-3 animate-fade-in-up-delay-2">
             {[
               { label: ".opus format", desc: "WhatsApp reads this as a native voice note, not music." },
-              { label: "Direct share", desc: "On Android, shares straight to WhatsApp via OS share sheet." },
+              { label: "Use Chrome", desc: "Chrome on Android enables one-tap share directly to WhatsApp." },
               { label: "No server", desc: "Converted entirely in your browser. Nothing is uploaded." },
             ].map((item) => (
               <div key={item.label} className="bg-surface-1 border border-surface-2 rounded-xl p-4">
@@ -451,4 +460,4 @@ export default function Home() {
       </footer>
     </div>
   );
-  }
+            }
