@@ -13,7 +13,7 @@ const UploadIcon = () => (
   </svg>
 );
 const WhatsAppIcon = () => (
-  <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+  <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
     <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 0 1-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 0 1-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 0 1 2.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0 0 12.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 0 0 5.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 0 0-3.48-8.413z"/>
   </svg>
 );
@@ -45,7 +45,6 @@ const DownloadIcon = () => (
   </svg>
 );
 
-// ─── Waveform ────────────────────────────────────────────────────────────────
 function Waveform({ active }: { active: boolean }) {
   return (
     <div className="flex items-center justify-center gap-[3px] h-8">
@@ -63,34 +62,25 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
 
-// ─── Core conversion using Web Audio API + MediaRecorder ─────────────────────
-// This approach has ZERO dependency on SharedArrayBuffer or WASM workers.
-// It decodes the audio natively in the browser, then re-encodes via MediaRecorder
-// with the opus codec — producing a valid audio/ogg; codecs=opus blob.
-async function convertToOpusOgg(
+// ─── Conversion: Web Audio API → MediaRecorder → OGG Opus ───────────────────
+async function convertToOpus(
   file: File,
   onProgress: (pct: number, label: string) => void
 ): Promise<Blob> {
   onProgress(5, "Decoding audio…");
-
-  // 1. Read file as ArrayBuffer
   const arrayBuffer = await file.arrayBuffer();
 
-  // 2. Decode with Web Audio API
   const audioCtx = new AudioContext({ sampleRate: 48000 });
   let audioBuffer: AudioBuffer;
   try {
     audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
   } catch {
-    // Try with a fresh context at default rate
     const fallbackCtx = new AudioContext();
     audioBuffer = await fallbackCtx.decodeAudioData(arrayBuffer.slice(0));
     await fallbackCtx.close();
   }
 
-  onProgress(30, "Preparing encoder…");
-
-  // 3. Mix down to mono at 48kHz via OfflineAudioContext
+  onProgress(30, "Mixing to mono 48kHz…");
   const offlineCtx = new OfflineAudioContext(1, Math.ceil(audioBuffer.duration * 48000), 48000);
   const source = offlineCtx.createBufferSource();
   source.buffer = audioBuffer;
@@ -99,17 +89,9 @@ async function convertToOpusOgg(
   const rendered = await offlineCtx.startRendering();
   await audioCtx.close();
 
-  onProgress(55, "Encoding to OGG Opus…");
+  onProgress(55, "Encoding Opus…");
 
-  // 4. Stream through MediaRecorder to get OGG Opus
-  // We pipe the rendered buffer into a live AudioContext → MediaStreamDestination → MediaRecorder
-  const encCtx = new AudioContext({ sampleRate: 48000 });
-  const dest = encCtx.createMediaStreamDestination();
-  const bufSrc = encCtx.createBufferSource();
-  bufSrc.buffer = rendered;
-  bufSrc.connect(dest);
-
-  // Pick best supported mime type
+  // Pick best supported MIME — prefer ogg/opus which WhatsApp recognises as voice note
   const mimeType = (() => {
     const candidates = [
       "audio/ogg; codecs=opus",
@@ -120,10 +102,16 @@ async function convertToOpusOgg(
     for (const m of candidates) {
       if (typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported(m)) return m;
     }
-    return "";
+    return null;
   })();
 
-  if (!mimeType) throw new Error("Your browser doesn't support audio recording. Please try Chrome or Firefox.");
+  if (!mimeType) throw new Error("Your browser doesn't support audio encoding. Please use Chrome or Firefox on Android.");
+
+  const encCtx = new AudioContext({ sampleRate: 48000 });
+  const dest = encCtx.createMediaStreamDestination();
+  const bufSrc = encCtx.createBufferSource();
+  bufSrc.buffer = rendered;
+  bufSrc.connect(dest);
 
   const recorder = new MediaRecorder(dest.stream, {
     mimeType,
@@ -134,36 +122,65 @@ async function convertToOpusOgg(
   recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
 
   const recordingDone = new Promise<Blob>((resolve, reject) => {
-    recorder.onstop = () => {
-      const blob = new Blob(chunks, { type: "audio/ogg; codecs=opus" });
-      resolve(blob);
-    };
-    recorder.onerror = (e) => reject(new Error("Recording error: " + e.toString()));
+    recorder.onstop = () => resolve(new Blob(chunks, { type: "audio/ogg; codecs=opus" }));
+    recorder.onerror = (e) => reject(new Error("Encoding error: " + e.toString()));
   });
 
   recorder.start(100);
   bufSrc.start(0);
 
-  // Stop recorder when audio finishes (+ small buffer)
-  const duration = rendered.duration;
   await new Promise<void>((resolve) => {
-    setTimeout(() => {
-      recorder.stop();
-      encCtx.close();
-      resolve();
-    }, (duration * 1000) + 300);
+    setTimeout(() => { recorder.stop(); encCtx.close(); resolve(); }, (rendered.duration * 1000) + 400);
   });
 
-  onProgress(90, "Finalising…");
+  onProgress(95, "Finalising…");
   const blob = await recordingDone;
-
   if (blob.size < 100) throw new Error("Output file is empty — the audio may be silent or corrupted.");
 
   onProgress(100, "Done!");
   return blob;
 }
 
-// ─── Main Component ──────────────────────────────────────────────────────────
+// ─── Share directly to WhatsApp ──────────────────────────────────────────────
+// Strategy:
+// 1. Try navigator.share() with file — on Android this opens the OS share sheet
+//    and the user picks WhatsApp. This is the ONLY way to share a file directly.
+// 2. WhatsApp REQUIRES the file to have .opus extension + audio/ogg;codecs=opus MIME
+//    to treat it as a voice note (not music).
+// 3. If share API unavailable → download the file as fallback.
+async function shareToWhatsApp(blob: Blob, baseName: string): Promise<"shared" | "downloaded" | "aborted"> {
+  // Always use .opus extension — WhatsApp identifies voice notes by this
+  const fileName = `${baseName}.opus`;
+  const file = new File([blob], fileName, { type: "audio/ogg; codecs=opus" });
+
+  // Try Web Share API (works on Android Chrome, Samsung Browser, etc.)
+  if (typeof navigator !== "undefined" && "share" in navigator) {
+    try {
+      const shareData: ShareData = { files: [file], title: "Voice Note" };
+      // canShare check
+      if (!("canShare" in navigator) || navigator.canShare(shareData)) {
+        await navigator.share(shareData);
+        return "shared";
+      }
+    } catch (err) {
+      if (err instanceof Error && err.name === "AbortError") return "aborted";
+      // Fall through to download
+    }
+  }
+
+  // Fallback: trigger download
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = fileName;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+  return "downloaded";
+}
+
+// ─── Main ────────────────────────────────────────────────────────────────────
 export default function Home() {
   const [stage, setStage] = useState<Stage>("idle");
   const [progress, setProgress] = useState(0);
@@ -174,11 +191,12 @@ export default function Home() {
   const [outputSize, setOutputSize] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
-  const [canShare, setCanShare] = useState(false);
+  const [shareStatus, setShareStatus] = useState<string | null>(null);
+  const [isMobile, setIsMobile] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    setCanShare(typeof navigator !== "undefined" && "share" in navigator && "canShare" in navigator);
+    setIsMobile(/Android|iPhone|iPad/i.test(navigator.userAgent));
   }, []);
 
   useEffect(() => {
@@ -186,22 +204,22 @@ export default function Home() {
   }, [outputUrl]);
 
   const processFile = async (file: File) => {
-    const isAudio = file.type.startsWith("audio/") || /\.(mp3|wav|ogg|m4a|aac|flac)$/i.test(file.name);
-    if (!isAudio) { setError("Please upload an audio file (MP3, WAV, OGG, M4A, AAC)."); setStage("error"); return; }
+    const isAudio = file.type.startsWith("audio/") || /\.(mp3|wav|ogg|m4a|aac|flac|opus)$/i.test(file.name);
+    if (!isAudio) { setError("Please upload an audio file (MP3, WAV, M4A, AAC)."); setStage("error"); return; }
 
     setInputFile(file);
     setOutputBlob(null);
     setOutputUrl(null);
+    setShareStatus(null);
     setError(null);
     setStage("converting");
     setProgress(0);
 
     try {
-      const blob = await convertToOpusOgg(file, (pct, label) => {
+      const blob = await convertToOpus(file, (pct, label) => {
         setProgress(pct);
         setProgressLabel(label);
       });
-
       const url = URL.createObjectURL(blob);
       setOutputBlob(blob);
       setOutputUrl(url);
@@ -229,34 +247,35 @@ export default function Home() {
   const handleDragOver = (e: React.DragEvent) => { e.preventDefault(); setIsDragOver(true); };
   const handleDragLeave = () => setIsDragOver(false);
 
+  const handleShare = async () => {
+    if (!outputBlob || !inputFile) return;
+    setShareStatus("opening…");
+    const baseName = inputFile.name.replace(/\.[^.]+$/, "");
+    const result = await shareToWhatsApp(outputBlob, baseName);
+    if (result === "downloaded") {
+      setShareStatus("📥 File downloaded — open it from your Downloads and share to WhatsApp manually.");
+    } else if (result === "shared") {
+      setShareStatus(null);
+    } else {
+      setShareStatus(null);
+    }
+  };
+
   const handleDownload = () => {
-    if (!outputUrl || !inputFile) return;
+    if (!outputBlob || !inputFile) return;
+    const url = URL.createObjectURL(outputBlob);
     const a = document.createElement("a");
-    a.href = outputUrl;
-    a.download = inputFile.name.replace(/\.[^.]+$/, "") + "_voicenote.ogg";
+    a.href = url;
+    a.download = inputFile.name.replace(/\.[^.]+$/, "") + ".opus";
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
-  };
-
-  const handleShare = async () => {
-    if (!outputBlob || !inputFile) return;
-    const fileName = inputFile.name.replace(/\.[^.]+$/, "") + "_voicenote.ogg";
-    const file = new File([outputBlob], fileName, { type: "audio/ogg; codecs=opus" });
-    try {
-      if (navigator.canShare && navigator.canShare({ files: [file] })) {
-        await navigator.share({ files: [file], title: "Voice Note" });
-      } else {
-        handleDownload();
-      }
-    } catch (err) {
-      if (err instanceof Error && err.name !== "AbortError") handleDownload();
-    }
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
   };
 
   const reset = () => {
     setStage("idle"); setInputFile(null); setOutputBlob(null);
-    setOutputUrl(null); setError(null); setProgress(0);
+    setOutputUrl(null); setError(null); setProgress(0); setShareStatus(null);
   };
 
   return (
@@ -283,8 +302,7 @@ export default function Home() {
             Audio →{" "}<span className="text-accent-green">WhatsApp</span><br />Voice Note
           </h1>
           <p className="text-text-secondary text-base max-w-md mx-auto leading-relaxed">
-            Upload an MP3 or WAV from ElevenLabs and convert it to the exact OGG Opus format
-            that WhatsApp recognises as a native voice note.
+            Upload an MP3 or WAV — get a <span className="text-accent-green font-semibold">.opus</span> file that WhatsApp shows as a native 🎙️ voice note.
           </p>
         </div>
 
@@ -304,7 +322,7 @@ export default function Home() {
               </div>
               <div className="text-center">
                 <p className="font-semibold text-text-primary mb-1">Drop your audio file here</p>
-                <p className="text-text-secondary text-sm">or click to browse · MP3, WAV, OGG, M4A, AAC</p>
+                <p className="text-text-secondary text-sm">or tap to browse · MP3, WAV, OGG, M4A, AAC</p>
               </div>
               <input ref={fileInputRef} type="file" accept="audio/*" className="hidden" onChange={(e) => handleFiles(e.target.files)} />
             </div>
@@ -323,59 +341,74 @@ export default function Home() {
                 </div>
               </div>
               {inputFile && <p className="text-text-muted text-xs font-mono truncate max-w-xs">{inputFile.name}</p>}
-              <p className="text-text-muted text-xs text-center">
-                Processing takes as long as the audio duration.<br />Please keep this tab open.
-              </p>
+              <p className="text-text-muted text-xs text-center">Processing takes roughly as long as the audio.<br />Keep this tab open.</p>
             </div>
           )}
 
           {/* Done */}
           {stage === "done" && outputUrl && (
             <div className="border border-accent-green/20 rounded-2xl bg-surface-1 overflow-hidden glow-pulse animate-fade-in-up">
+              {/* Success bar */}
               <div className="bg-accent-green/10 border-b border-accent-green/20 px-6 py-4 flex items-center gap-3">
                 <div className="w-8 h-8 rounded-full bg-accent-green flex items-center justify-center text-surface-0 flex-shrink-0"><CheckIcon /></div>
                 <div>
-                  <p className="font-semibold text-accent-green text-sm">Conversion complete</p>
-                  <p className="text-text-muted text-xs font-mono">audio/ogg; codecs=opus · {formatBytes(outputSize)}</p>
+                  <p className="font-semibold text-accent-green text-sm">Ready to share</p>
+                  <p className="text-text-muted text-xs font-mono">audio/ogg; codecs=opus · {formatBytes(outputSize)} · .opus</p>
                 </div>
               </div>
 
-              <div className="px-6 py-5">
-                <div className="mb-4">
+              <div className="px-6 py-5 space-y-4">
+                {/* Preview */}
+                <div>
                   <p className="text-text-secondary text-xs font-mono mb-2 uppercase tracking-widest">Preview</p>
                   <audio controls src={outputUrl} className="w-full rounded-lg" style={{ accentColor: "#25D366" }} />
                 </div>
 
+                {/* File info */}
                 {inputFile && (
-                  <div className="bg-surface-2 rounded-xl px-4 py-3 flex items-center justify-between mb-5">
+                  <div className="bg-surface-2 rounded-xl px-4 py-3 flex items-center justify-between">
                     <div className="min-w-0">
                       <p className="text-text-primary text-sm font-medium truncate">{inputFile.name}</p>
                       <p className="text-text-muted text-xs font-mono">{formatBytes(inputFile.size)} → {formatBytes(outputSize)}</p>
                     </div>
-                    <span className="ml-4 flex-shrink-0 text-xs font-mono bg-accent-green/10 text-accent-green px-2 py-1 rounded-lg border border-accent-green/20">.ogg</span>
+                    <span className="ml-4 flex-shrink-0 text-xs font-mono bg-accent-green/10 text-accent-green px-2 py-1 rounded-lg border border-accent-green/20">.opus</span>
                   </div>
                 )}
 
-                <div className="space-y-3">
-                  <button onClick={handleShare}
-                    className="w-full flex items-center justify-center gap-2.5 bg-accent-green hover:bg-accent-green-dim text-surface-0 font-bold py-3.5 px-6 rounded-xl transition-all duration-150 hover:scale-[1.01] active:scale-[0.99]">
-                    <WhatsAppIcon />
-                    {canShare ? "Share as Voice Note" : "Download Voice Note (.ogg)"}
-                  </button>
+                {/* Share status message */}
+                {shareStatus && (
+                  <div className="bg-surface-2 border border-surface-3 rounded-xl px-4 py-3">
+                    <p className="text-text-secondary text-xs leading-relaxed">{shareStatus}</p>
+                  </div>
+                )}
 
-                  {canShare && (
-                    <button onClick={handleDownload}
-                      className="w-full flex items-center justify-center gap-2 text-text-secondary hover:text-text-primary border border-surface-3 hover:border-text-muted py-3 px-6 rounded-xl transition-all duration-150 text-sm">
-                      <DownloadIcon />
-                      Save as file instead
-                    </button>
-                  )}
+                {/* Primary: Share via WhatsApp */}
+                <button
+                  onClick={handleShare}
+                  className="w-full flex items-center justify-center gap-2.5 bg-accent-green hover:bg-accent-green-dim text-surface-0 font-bold py-4 px-6 rounded-xl transition-all duration-150 hover:scale-[1.01] active:scale-[0.99] text-base"
+                >
+                  <WhatsAppIcon />
+                  {isMobile ? "Share as Voice Note" : "Share / Download .opus"}
+                </button>
 
-                  <p className="text-text-muted text-xs text-center leading-relaxed">
-                    On mobile: tap <span className="text-accent-green">Share as Voice Note</span> then pick WhatsApp.<br />
-                    WhatsApp will show it as a 🎙️ voice message, not a music file.
+                {/* How it works tip */}
+                <div className="bg-surface-2/50 rounded-xl px-4 py-3 border border-surface-3">
+                  <p className="text-text-muted text-xs leading-relaxed">
+                    {isMobile
+                      ? <>Tap the button above → your OS share sheet opens → pick <strong className="text-text-secondary">WhatsApp</strong> → select a contact → send. WhatsApp will show it as a 🎙️ voice note.</>
+                      : <>On <strong className="text-text-secondary">desktop</strong>: the file downloads as <code className="text-accent-green">.opus</code>. Send it via WhatsApp Web by attaching as a file — WhatsApp Web will show it as a voice note.</>
+                    }
                   </p>
                 </div>
+
+                {/* Secondary: explicit download */}
+                <button
+                  onClick={handleDownload}
+                  className="w-full flex items-center justify-center gap-2 text-text-secondary hover:text-text-primary border border-surface-3 hover:border-text-muted py-3 px-6 rounded-xl transition-all duration-150 text-sm"
+                >
+                  <DownloadIcon />
+                  Download .opus file
+                </button>
               </div>
 
               <div className="border-t border-surface-2 px-6 py-3">
@@ -400,9 +433,9 @@ export default function Home() {
         {stage === "idle" && (
           <div className="w-full max-w-lg grid grid-cols-3 gap-3 animate-fade-in-up-delay-2">
             {[
-              { label: "Browser-only", desc: "No server. Files never leave your device." },
-              { label: "Opus codec", desc: "The exact format WhatsApp uses for voice notes." },
-              { label: "No WASM", desc: "Uses native Web Audio API — works on all browsers." },
+              { label: ".opus format", desc: "WhatsApp reads this as a native voice note, not music." },
+              { label: "Direct share", desc: "On Android, shares straight to WhatsApp via OS share sheet." },
+              { label: "No server", desc: "Converted entirely in your browser. Nothing is uploaded." },
             ].map((item) => (
               <div key={item.label} className="bg-surface-1 border border-surface-2 rounded-xl p-4">
                 <p className="font-semibold text-text-primary text-sm mb-1">{item.label}</p>
@@ -418,4 +451,4 @@ export default function Home() {
       </footer>
     </div>
   );
-}
+  }
