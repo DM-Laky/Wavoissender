@@ -183,7 +183,7 @@ export default function Home() {
       setProgress(95);
 
       const data = await ffmpeg.readFile(outputName);
-      const blob = new Blob([data], { type: "audio/ogg; codecs=opus" });
+const blob = new Blob([data instanceof Uint8Array ? data : new Uint8Array(data as ArrayBuffer)], { type: "audio/ogg; codecs=opus" });
       const url = URL.createObjectURL(blob);
 
       // Cleanup ffmpeg virtual FS
